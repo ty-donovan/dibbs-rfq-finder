@@ -96,7 +96,8 @@ async function loadResults() {
 // ---------- rendering ----------
 function renderRows({ total, rows, offset }) {
   const filtered = MULTI.some((k) => state[k].length) || state.set_aside;
-  $("#summary").textContent = `${total.toLocaleString()} ${filtered ? "matching" : "open"} RFQ${total === 1 ? "" : "s"}` +
+  const noun = filtered ? "matching " : state.include_closed ? "" : "open ";
+  $("#summary").textContent = `${total.toLocaleString()} ${noun}RFQ${total === 1 ? "" : "s"}` +
     (state.date ? ` issued ${fmtDay(state.date, { weekday: "short", month: "short", day: "numeric" })}` : "");
   $("#empty").hidden = total > 0;
   $("#rows").innerHTML = rows.map(rowHtml).join("");
@@ -152,7 +153,9 @@ function addValue(key, raw) {
 document.querySelectorAll("input[data-key]").forEach((input) => {
   const commit = () => { addValue(input.dataset.key, input.value); input.value = ""; };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } });
-  input.addEventListener("change", () => { if (input.dataset.key === "fsc") commit(); }); // datalist pick
+  input.addEventListener("input", (e) => { // picking a datalist suggestion applies it immediately
+    if (input.dataset.key === "fsc" && (!e.inputType || e.inputType === "insertReplacementText")) commit();
+  });
   input.addEventListener("blur", () => { if (input.value.trim()) commit(); });
 });
 
