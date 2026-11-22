@@ -21,12 +21,13 @@ def snapshot_path(d: date) -> Path:
     return DATA_DIR / f"snapshot-{d.isoformat()}.json"
 
 
-def scrape(d: date, save_raw: bool = True) -> list[dict]:
+def scrape(d: date, save_raw: bool = True, on_progress=None) -> list[dict]:
+    """Pull every RFQ issued on `d` and write data/snapshot-<d>.json. on_progress(page, total_pages)."""
     raw_dir = DATA_DIR / "raw" if save_raw else None
     if raw_dir:
         raw_dir.mkdir(parents=True, exist_ok=True)
     with DibbsClient() as client:
-        rows = client.fetch_issue_date(d, raw_dir=raw_dir)
+        rows = client.fetch_issue_date(d, raw_dir=raw_dir, on_progress=on_progress)
     scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for r in rows:
         r["scraped_at"] = scraped_at
@@ -54,8 +55,9 @@ def rebuild_from_raw(d: date) -> list[dict]:
 def main(argv: list[str]) -> None:
     args = [a for a in argv[1:] if not a.startswith("--")]
     d = date.fromisoformat(args[0]) if args else date.today()
-    rows = rebuild_from_raw(d) if "--from-raw" in argv else scrape(d)
-    print(f"{len(rows)} RFQs issued {d} -> {snapshot_path(d)}")
+    progress = lambda page, pages: print(f"\r  page {page}/{pages}", end="", flush=True)
+    rows = rebuild_from_raw(d) if "--from-raw" in argv else scrape(d, on_progress=progress)
+    print(f"\n{len(rows)} RFQs issued {d} -> {snapshot_path(d)}")
     for r in rows[:5]:
         print(f"  {r['solicitation_number']:<18} {r['nsn']:<15} {r['nomenclature'][:30]:<30} due {r['return_by_date']}")
 

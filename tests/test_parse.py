@@ -44,8 +44,8 @@ def test_search_filters(tmp_path, monkeypatch):
     conn = db.connect()
     base = {c: None for c in db.COLUMNS} | {"status": "Open", "issue_date": "2026-11-20", "set_aside": "Unrestricted"}
     rows = [
-        base | {"solicitation_number": "A", "nsn": "5330012345678", "fsc": "5330", "nomenclature": "GASKET", "return_by_date": "2026-11-27"},
-        base | {"solicitation_number": "B", "nsn": "4820004553256", "fsc": "4820", "nomenclature": "VALVE, GATE", "return_by_date": "2026-11-25", "set_aside": "HUBZone"},
+        base | {"solicitation_number": "A", "nsn": "5330012345678", "fsc": "5330", "nomenclature": "GASKET", "return_by_date": "2999-11-27"},
+        base | {"solicitation_number": "B", "nsn": "4820004553256", "fsc": "4820", "nomenclature": "VALVE, GATE", "return_by_date": "2999-11-25", "set_aside": "HUBZone"},
         base | {"solicitation_number": "C", "nsn": "5310011123119", "fsc": "5310", "nomenclature": "NUT", "status": "Cancelled"},
     ]
     conn.executemany(f"INSERT INTO solicitations ({', '.join(db.COLUMNS)}) VALUES ({', '.join('?' * len(db.COLUMNS))})",

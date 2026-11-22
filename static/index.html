@@ -12,12 +12,29 @@
       <h1>DIBBS RFQ Finder</h1>
       <p class="tagline">Find the DLA solicitations worth quoting</p>
     </div>
-    <div class="day-picker">
-      <label for="date">Issued on</label>
-      <select id="date"></select>
-      <span id="freshness" class="muted"></span>
+    <div class="day-controls">
+      <div class="control">
+        <label for="date">Searching</label>
+        <select id="date"></select>
+        <span id="freshness" class="fine"></span>
+      </div>
+      <div class="control">
+        <label for="dibbs-date">Pull from DIBBS</label>
+        <div class="inline">
+          <select id="dibbs-date" disabled><option>Loading dates…</option></select>
+          <button id="pull" class="primary" disabled>Pull</button>
+        </div>
+        <span class="fine">~10 min per day</span>
+      </div>
     </div>
   </header>
+
+  <div id="job" class="job" hidden role="status" aria-live="polite">
+    <div class="job-text"><strong id="job-label"></strong> <span id="job-message"></span></div>
+    <div class="bar"><div id="job-bar"></div></div>
+    <span id="job-eta" class="fine"></span>
+    <button id="job-dismiss" class="link" hidden>Dismiss</button>
+  </div>
 
   <main class="layout">
     <aside class="filters" aria-label="Filters">
@@ -53,7 +70,21 @@
       </section>
 
       <section class="filter">
+        <label class="check"><input type="checkbox" id="include-past-due"> Include RFQs past their return-by date</label>
         <label class="check"><input type="checkbox" id="include-closed"> Include cancelled / removed</label>
+      </section>
+
+      <section class="filter group">
+        <h2 class="group-title">From DIBBS NSN records</h2>
+        <p class="hint" id="coverage"></p>
+        <fieldset class="amsc-filter">
+          <legend>AMSC (why the government buys it this way)</legend>
+          <div id="amsc-options"></div>
+        </fieldset>
+        <label for="source-input">Approved source</label>
+        <div class="chips" data-key="source"></div>
+        <input id="source-input" data-key="source" placeholder="CAGE, part number, or company" autocomplete="off">
+        <p class="hint">Find RFQs where a manufacturer you carry is an approved source.</p>
       </section>
 
       <button id="clear" class="secondary">Clear all filters</button>
@@ -62,7 +93,17 @@
     <section class="results" aria-live="polite">
       <div class="results-head">
         <h2 id="summary">Loading…</h2>
-        <a id="export" class="secondary button" href="#">Export CSV</a>
+        <div class="actions">
+          <details id="check-menu" class="menu">
+            <summary class="button">Check approved sources &amp; AMSC ▾</summary>
+            <div class="menu-body">
+              <p class="fine">Looks up each NSN's record on DIBBS (~1.6 s per NSN). Results are cached, so NSNs are only checked once.</p>
+              <button type="button" data-scope="filtered" class="menu-item"><strong>These results</strong><span id="est-filtered">…</span></button>
+              <button type="button" data-scope="day" class="menu-item"><strong>Whole day</strong><span id="est-day">…</span></button>
+            </div>
+          </details>
+          <a id="export" class="secondary button" href="#">Export CSV</a>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -74,7 +115,8 @@
               <th data-sort="nomenclature">Nomenclature</th>
               <th data-sort="fsc">FSC</th>
               <th data-sort="qty" class="num">Qty</th>
-              <th data-sort="set_aside">Set-aside</th>
+              <th data-sort="amsc">AMSC</th>
+              <th>Approved sources</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
