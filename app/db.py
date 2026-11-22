@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS nsn_info (
 SORTABLE = {
     "return_by": "s.return_by_date", "solicitation": "s.solicitation_number", "nsn": "s.nsn",
     "nomenclature": "s.nomenclature", "fsc": "s.fsc", "qty": "s.quantity", "set_aside": "s.set_aside",
-    "amsc": "i.amsc",
+    "amsc": "COALESCE(i.amsc, '~')",  # unchecked NSNs sort after every AMSC letter
 }
 
 SET_ASIDE_ANY = "Any set-aside"
