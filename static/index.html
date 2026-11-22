@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DIBBS RFQ Finder</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>DIBBS RFQ Finder</h1>
+      <p class="tagline">Find the DLA solicitations worth quoting</p>
+    </div>
+    <div class="day-picker">
+      <label for="date">Issued on</label>
+      <select id="date"></select>
+      <span id="freshness" class="muted"></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="filters" aria-label="Filters">
+      <section class="filter">
+        <label for="kw-input">Nomenclature</label>
+        <div class="chips" data-key="kw"></div>
+        <input id="kw-input" data-key="kw" placeholder="e.g. valve, gasket" autocomplete="off">
+        <p class="hint">Press Enter after each keyword. Matches any of them.</p>
+      </section>
+
+      <section class="filter">
+        <label for="nsn-input">NSN</label>
+        <div class="chips" data-key="nsn"></div>
+        <input id="nsn-input" data-key="nsn" placeholder="5310-01-234-5678 or NIIN" autocomplete="off">
+        <p class="hint">Full or partial; dashes optional.</p>
+      </section>
+
+      <section class="filter">
+        <label for="fsc-input">FSC (supply class)</label>
+        <div class="chips" data-key="fsc"></div>
+        <input id="fsc-input" data-key="fsc" list="fsc-options" placeholder="e.g. 5310, or 53 for the group" autocomplete="off">
+        <datalist id="fsc-options"></datalist>
+        <p class="hint">First 4 digits of the NSN.</p>
+        <div class="top-fsc">
+          <h3>Busiest classes this day</h3>
+          <ol id="top-fsc"></ol>
+        </div>
+      </section>
+
+      <section class="filter">
+        <label for="set-aside">Set-aside</label>
+        <select id="set-aside"></select>
+      </section>
+
+      <section class="filter">
+        <label class="check"><input type="checkbox" id="include-closed"> Include cancelled / removed</label>
+      </section>
+
+      <button id="clear" class="secondary">Clear all filters</button>
+    </aside>
+
+    <section class="results" aria-live="polite">
+      <div class="results-head">
+        <h2 id="summary">Loading…</h2>
+        <a id="export" class="secondary button" href="#">Export CSV</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-sort="return_by">Return by</th>
+              <th data-sort="solicitation">Solicitation</th>
+              <th data-sort="nsn">NSN</th>
+              <th data-sort="nomenclature">Nomenclature</th>
+              <th data-sort="fsc">FSC</th>
+              <th data-sort="qty" class="num">Qty</th>
+              <th data-sort="set_aside">Set-aside</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty" class="empty" hidden>No RFQs match these filters. Try removing one.</p>
+      </div>
+      <nav class="pager" aria-label="Pagination">
+        <button id="prev" class="secondary">← Previous</button>
+        <span id="page-info" class="muted"></span>
+        <button id="next" class="secondary">Next →</button>
+      </nav>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

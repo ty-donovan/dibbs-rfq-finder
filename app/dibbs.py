@@ -50,7 +50,9 @@ class DibbsClient:
         url = path_or_url if path_or_url.startswith("http") else BASE + path_or_url
         resp = self.http.get(url)
         if "dodwarning.aspx" in str(resp.url).lower():
-            resp = self._accept_consent(resp)
+            self._accept_consent(resp)
+            # The banner's ?goto= keeps only the first query param, so re-request the real URL.
+            resp = self.http.get(url)
         if "Request Rejected" in resp.text[:300]:
             raise RuntimeError("DIBBS firewall rejected the request")
         return resp
@@ -67,15 +69,18 @@ class DibbsClient:
 
     def fetch_issue_date(self, d: date, raw_dir=None, max_pages: int = 200) -> list[dict]:
         """All RFQs issued on `d`, following the ASP.NET GridView pager via __doPostBack."""
-        url = f"{BASE}/RFQ/RfqRecs.aspx?category=issue&TypeSrch=dt&Value={mmddyyyy(d)}"
-        resp = self.get(url)
+        resp = self._open_issue_date(d, raw_dir)
         rows: list[dict] = []
         page = 1
         while True:
             if raw_dir is not None:
                 (raw_dir / f"recs_{d.isoformat()}_p{page}.html").write_text(resp.text, encoding="utf-8")
             soup = BeautifulSoup(resp.text, "lxml")
-            rows.extend(parse_rfq_grid(soup))
+            page_rows = parse_rfq_grid(soup)
+            if page == 1 and not page_rows:
+                notes = [_text(soup.find(id=i)) for i in ("ctl00_cph1_lblRecCount", "ctl00_cph1_lblErrNarr", "ctl00_cph1_lblNegResp")]
+                print(f"warning: no rows parsed from {resp.url}; DIBBS says: {' | '.join(n for n in notes if n) or '(nothing)'}")
+            rows.extend(page_rows)
             target = next_page_target(soup, page + 1)
             if target is None or page >= max_pages:
                 break
@@ -88,6 +93,30 @@ class DibbsClient:
             r.setdefault("issue_date", d.isoformat())
             r["issue_date"] = r["issue_date"] or d.isoformat()
         return list(unique.values())
+
+    def _open_issue_date(self, d: date, raw_dir=None) -> httpx.Response:
+        """Follow DIBBS's own link for `d` from the 'RFQs by Issue Date' listing."""
+        listing = self.get("/RFQ/RfqDates.aspx?category=issue")
+        if raw_dir is not None:
+            (raw_dir / "dates_issue.html").write_text(listing.text, encoding="utf-8")
+        soup = BeautifulSoup(listing.text, "lxml")
+        variants = {
+            d.strftime(f) for f in ("%m-%d-%Y", "%m/%d/%Y", "%Y-%m-%d", "%m%d%Y", "%Y%m%d", "%m-%d-%y", "%m/%d/%y", "%d%b%y")
+        } | {f"{d.month}/{d.day}/{d.year}", f"{d.month}-{d.day}-{d.year}"}
+        variants |= {v.upper() for v in variants}
+        links = [a for a in soup.find_all("a", href=True) if "rfqrecs" in a["href"].lower()]
+        for a in links:
+            haystack = a["href"] + " " + _text(a)
+            if any(v in haystack for v in variants):
+                href = a["href"]
+                m = re.search(r"__doPostBack\('([^']+)','([^']*)'\)", href)
+                if m:  # date links rendered as postbacks
+                    data = hidden_fields(soup) | {"__EVENTTARGET": m.group(1), "__EVENTARGUMENT": m.group(2)}
+                    return self.http.post(str(listing.url), data=data)
+                return self.get(_abs(href))
+        shown = ", ".join(_text(a) for a in links[:12]) or "none"
+        print(f"warning: no listing link for {d}; available: {shown}. Trying direct URL.")
+        return self.get(f"{BASE}/RFQ/RfqRecs.aspx?category=issue&TypeSrch=dt&Value={mmddyyyy(d)}")
 
 
 # ---- parsing -----------------------------------------------------------------
@@ -132,98 +161,88 @@ def _text(el) -> str:
     return " ".join(el.get_text(" ", strip=True).split()) if el else ""
 
 
-def _find_results_table(soup: BeautifulSoup):
-    """The results grid is the innermost table whose header mentions both NSN and Solicitation."""
-    best = None
-    for table in soup.find_all("table"):
-        first = table.find("tr")
-        header = _text(first).lower() if first else ""
-        if "solicitation" in header and "nsn" in header:
-            best = table  # keep going: later matches are nested deeper
-    return best
+GRID_ID = "ctl00_cph1_grdRfqSearch"
+
+# DIBBS renders set-aside type as an icon; normalize its alt text to a short label.
+SET_ASIDES = [
+    ("service disabled", "SDVOSB"),
+    ("hubzone", "HUBZone"),
+    ("8a", "8(a)"),
+    ("women", "WOSB"),
+    ("small business", "Small Business"),
+    ("unrestricted", "Unrestricted"),
+]
 
 
-def _column_map(header_cells) -> dict[str, int]:
-    cols: dict[str, int] = {}
-    for i, cell in enumerate(header_cells):
-        h = _text(cell).lower()
-        for key, needle in [
-            ("nsn", "nsn"),
-            ("nomenclature", "nomenclature"),
-            ("solicitation", "solicitation"),
-            ("status", "status"),
-            ("pr_qty", "qty"),
-            ("issued", "issue"),
-            ("return_by", "return"),
-            ("tech_docs", "technical"),
-        ]:
-            if needle in h and key not in cols:
-                cols[key] = i
-                break
-    return cols
+def _span(tr, field: str):
+    """Each grid cell holds a span whose id ends in _lbl<Field> (e.g. ..._ctl03_lblNsn)."""
+    return tr.find("span", id=re.compile(rf"_lbl{field}$"))
 
 
 def parse_rfq_grid(soup: BeautifulSoup) -> list[dict]:
-    table = _find_results_table(soup)
+    table = soup.find("table", id=GRID_ID)
     if table is None:
         return []
-    trs = table.find_all("tr", recursive=False) or table.find_all("tr")
-    cols = _column_map(trs[0].find_all(["th", "td"], recursive=False))
     out: list[dict] = []
-    for tr in trs[1:]:
-        cells = tr.find_all("td", recursive=False)
-        if len(cells) < len(cols) or "__doPostBack" in str(tr):
-            continue  # pager / spacer rows
-
-        def cell(key):
-            i = cols.get(key)
-            return cells[i] if i is not None and i < len(cells) else None
-
-        sol_cell = cell("solicitation")
-        m = SOL_RE.search(_text(sol_cell))
+    for tr in table.find_all("tr", recursive=False):
+        sol_span = _span(tr, "Solicitation")
+        if sol_span is None:
+            continue  # pager / header rows
+        m = SOL_RE.search(_text(sol_span))
         if not m:
             continue
         sol = m.group(1)
-        sol_link = sol_cell.find("a", href=True) if sol_cell else None
+        pdf_link = sol_span.find("a", href=re.compile(r"\.pdf$", re.I))
+        pkg_link = sol_span.find("a", href=re.compile(r"rfqrec\.aspx", re.I))
+        alts = [img.get("alt", "") for img in sol_span.find_all("img")]
 
-        nsn_cell = cell("nsn")
-        nsn_link = nsn_cell.find("a", href=True) if nsn_cell else None
-        nsn_text = _text(nsn_link) or _text(nsn_cell)
-        nsn_digits = digits(nsn_text)[:13]
+        nsn_span = _span(tr, "Nsn")
+        nsn_link = nsn_span.find("a", href=True) if nsn_span else None
+        nsn_text = _text(nsn_link) or _text(nsn_span)
+        nsn_digits = digits(nsn_text)
         is_nsn = len(nsn_digits) == 13
-        nomenclature = _text(cell("nomenclature"))
+        tags = [_text(s) for s in nsn_span.find_all("span")] if nsn_span else []
 
-        pr_qty = _text(cell("pr_qty"))
-        qty_m = re.search(r"qty\W*([\d,]+)", pr_qty, re.I)
-        pr_m = re.search(r"pr\W*#?\W*(\w+)", pr_qty, re.I)
+        tech_span = _span(tr, "TechnicalDocuments")
+        tech_link = tech_span.find("a", href=True) if tech_span else None
+
+        status_span = _span(tr, "Status")
+        status_inner = status_span.find("span") if status_span else None
+
+        pr_text = _text(_span(tr, "Pr"))
+        qty_m = re.search(r"qty\W*([\d,]+)", pr_text, re.I)
+        pr_m = re.match(r"\s*(\w+)", pr_text)
 
         out.append(
             {
                 "solicitation_number": sol,
                 "nsn": nsn_digits if is_nsn else nsn_text,
                 "fsc": nsn_digits[:4] if is_nsn else None,
-                "nomenclature": nomenclature,
+                "nomenclature": _text(_span(tr, "Nomenclature")),
                 "quantity": int(qty_m.group(1).replace(",", "")) if qty_m else None,
-                "pr_number": pr_m.group(1) if pr_m else None,
-                "status": _text(cell("status")) or None,
-                "set_aside": _set_aside(sol_cell),
-                "issue_date": iso_date(_text(cell("issued"))),
-                "return_by_date": iso_date(_text(cell("return_by"))),
-                "solicitation_url": _abs(sol_link["href"]) if sol_link else solicitation_pdf_url(sol),
+                "pr_number": pr_m.group(1) if pr_m and not pr_m.group(1).upper().startswith("QTY") else None,
+                "status": _text(status_inner) or None,
+                "set_aside": _set_aside(alts),
+                "fast_award": any(a.lower().startswith("fast award") for a in alts),
+                "mil_spec": any("mil-spec" in t.lower() for t in tags),
+                "issue_date": iso_date(_text(_span(tr, "Issued"))),
+                "return_by_date": iso_date(_text(_span(tr, "ReturnBy"))),
+                "package_url": _abs(pkg_link["href"]) if pkg_link else f"{BASE}/rfq/rfqrec.aspx?sn={sol.replace('-', '')}",
+                "solicitation_url": _abs(pdf_link["href"]) if pdf_link else solicitation_pdf_url(sol),
                 "nsn_url": _abs(nsn_link["href"]) if nsn_link else (nsn_page_url(nsn_digits) if is_nsn else None),
+                "tech_docs_url": tech_link["href"] if tech_link else None,
             }
         )
     return out
 
 
-def _set_aside(sol_cell) -> str | None:
-    """Anything in the solicitation cell beyond the number itself (e.g. small-business set-aside notes)."""
-    if sol_cell is None:
-        return None
-    extra = SOL_RE.sub("", _text(sol_cell)).strip(" -|")
-    alts = [img.get("alt", "") for img in sol_cell.find_all("img") if img.get("alt")]
-    text = " ".join([extra, *alts]).strip()
-    return text or None
+def _set_aside(alts: list[str]) -> str | None:
+    for alt in alts:
+        low = alt.lower().replace("(", "").replace(")", "")
+        for needle, label in SET_ASIDES:
+            if needle in low:
+                return label
+    return None
 
 
 def _abs(href: str) -> str:
