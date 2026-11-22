@@ -19,7 +19,7 @@ COLUMNS = [
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS solicitations (
     {", ".join(COLUMNS)},
-    PRIMARY KEY (solicitation_number, nsn)
+    PRIMARY KEY (solicitation_number, nsn, pr_number)
 );
 CREATE INDEX IF NOT EXISTS ix_issue ON solicitations(issue_date);
 CREATE INDEX IF NOT EXISTS ix_fsc ON solicitations(fsc);

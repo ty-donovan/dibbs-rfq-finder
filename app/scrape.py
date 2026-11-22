@@ -42,8 +42,9 @@ def rebuild_from_raw(d: date) -> list[dict]:
     for p in pages:
         for r in parse_rfq_grid(BeautifulSoup(p.read_text(encoding="utf-8"), "lxml")):
             r["issue_date"] = r["issue_date"] or d.isoformat()
-            rows[(r["solicitation_number"], r["nsn"])] = r
-    scraped_at = datetime.fromtimestamp(pages[-1].stat().st_mtime, timezone.utc).isoformat(timespec="seconds") if pages else None
+            rows[(r["solicitation_number"], r["nsn"], r["pr_number"])] = r
+    newest = max((p.stat().st_mtime for p in pages), default=None)
+    scraped_at = datetime.fromtimestamp(newest, timezone.utc).isoformat(timespec="seconds") if newest else None
     out = [r | {"scraped_at": scraped_at} for r in rows.values()]
     snapshot_path(d).write_text(json.dumps(out, indent=1), encoding="utf-8")
     print(f"re-parsed {len(pages)} saved pages")

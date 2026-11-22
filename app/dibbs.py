@@ -87,8 +87,8 @@ class DibbsClient:
             data = hidden_fields(soup) | {"__EVENTTARGET": target, "__EVENTARGUMENT": f"Page${page + 1}"}
             resp = self.http.post(str(resp.url), data=data)
             page += 1
-        # The grid can repeat a row across page boundaries; key on solicitation + NSN.
-        unique = {(r["solicitation_number"], r["nsn"]): r for r in rows}
+        # A solicitation can carry several purchase requests for the same NSN, so PR is part of the key.
+        unique = {(r["solicitation_number"], r["nsn"], r["pr_number"]): r for r in rows}
         for r in unique.values():
             r.setdefault("issue_date", d.isoformat())
             r["issue_date"] = r["issue_date"] or d.isoformat()
