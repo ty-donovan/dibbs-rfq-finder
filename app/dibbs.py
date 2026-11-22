@@ -1,0 +1,239 @@
+"""DIBBS client: gets past the WAF + DoD consent banner and pulls RFQs by issue date."""
+
+from __future__ import annotations
+
+import re
+from datetime import date
+
+import httpx
+from bs4 import BeautifulSoup
+
+BASE = "https://www.dibbs.bsm.dla.mil"
+
+# DIBBS sits behind an F5 WAF that rejects non-browser clients outright.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def hidden_fields(soup: BeautifulSoup) -> dict[str, str]:
+    """All ASP.NET hidden inputs (__VIEWSTATE*, __EVENTVALIDATION, ...) needed to post a form back."""
+    return {
+        i["name"]: i.get("value", "")
+        for i in soup.select("input[type=hidden]")
+        if i.get("name")
+    }
+
+
+class DibbsClient:
+    def __init__(self, timeout: float = 60.0):
+        self.http = httpx.Client(
+            headers=BROWSER_HEADERS, follow_redirects=True, timeout=timeout
+        )
+
+    def close(self) -> None:
+        self.http.close()
+
+    def __enter__(self) -> DibbsClient:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def get(self, path_or_url: str) -> httpx.Response:
+        """GET a page, clicking through the DoD consent banner if DIBBS redirects us to it."""
+        url = path_or_url if path_or_url.startswith("http") else BASE + path_or_url
+        resp = self.http.get(url)
+        if "dodwarning.aspx" in str(resp.url).lower():
+            resp = self._accept_consent(resp)
+        if "Request Rejected" in resp.text[:300]:
+            raise RuntimeError("DIBBS firewall rejected the request")
+        return resp
+
+    def _accept_consent(self, warning_page: httpx.Response) -> httpx.Response:
+        soup = BeautifulSoup(warning_page.text, "lxml")
+        form = soup.find("form")
+        data = hidden_fields(soup) | {"butAgree": "OK"}
+        action = httpx.URL(str(warning_page.url)).join(form["action"])
+        return self.http.post(action, data=data)
+
+
+    # ---- RFQs by issue date -------------------------------------------------
+
+    def fetch_issue_date(self, d: date, raw_dir=None, max_pages: int = 200) -> list[dict]:
+        """All RFQs issued on `d`, following the ASP.NET GridView pager via __doPostBack."""
+        url = f"{BASE}/RFQ/RfqRecs.aspx?category=issue&TypeSrch=dt&Value={mmddyyyy(d)}"
+        resp = self.get(url)
+        rows: list[dict] = []
+        page = 1
+        while True:
+            if raw_dir is not None:
+                (raw_dir / f"recs_{d.isoformat()}_p{page}.html").write_text(resp.text, encoding="utf-8")
+            soup = BeautifulSoup(resp.text, "lxml")
+            rows.extend(parse_rfq_grid(soup))
+            target = next_page_target(soup, page + 1)
+            if target is None or page >= max_pages:
+                break
+            data = hidden_fields(soup) | {"__EVENTTARGET": target, "__EVENTARGUMENT": f"Page${page + 1}"}
+            resp = self.http.post(str(resp.url), data=data)
+            page += 1
+        # The grid can repeat a row across page boundaries; key on solicitation + NSN.
+        unique = {(r["solicitation_number"], r["nsn"]): r for r in rows}
+        for r in unique.values():
+            r.setdefault("issue_date", d.isoformat())
+            r["issue_date"] = r["issue_date"] or d.isoformat()
+        return list(unique.values())
+
+
+# ---- parsing -----------------------------------------------------------------
+
+SOL_RE = re.compile(r"\b(SP[A-Z0-9]{4}-?\d{2}-?[A-Z]-?[A-Z0-9]{4})\b")
+DATE_RE = re.compile(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})")
+PAGER_RE = re.compile(r"__doPostBack\('([^']+)','Page\$(\d+)'\)")
+
+
+def mmddyyyy(d: date) -> str:
+    return d.strftime("%m-%d-%Y")
+
+
+def digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
+def iso_date(text: str) -> str | None:
+    m = DATE_RE.search(text or "")
+    if not m:
+        return None
+    mm, dd, yyyy = m.groups()
+    return f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
+
+
+def format_nsn(nsn_digits: str) -> str:
+    d = nsn_digits
+    return f"{d[:4]}-{d[4:6]}-{d[6:9]}-{d[9:]}" if len(d) == 13 else d
+
+
+def solicitation_pdf_url(sol: str) -> str:
+    """DIBBS files solicitation PDFs in a folder named after the number's last character."""
+    compact = sol.replace("-", "")
+    return f"https://dibbs2.bsm.dla.mil/Downloads/RFQ/{compact[-1]}/{compact}.PDF"
+
+
+def nsn_page_url(nsn_digits: str) -> str:
+    return f"{BASE}/RFQ/RFQNsn.aspx?value={nsn_digits}&category=issue"
+
+
+def _text(el) -> str:
+    return " ".join(el.get_text(" ", strip=True).split()) if el else ""
+
+
+def _find_results_table(soup: BeautifulSoup):
+    """The results grid is the innermost table whose header mentions both NSN and Solicitation."""
+    best = None
+    for table in soup.find_all("table"):
+        first = table.find("tr")
+        header = _text(first).lower() if first else ""
+        if "solicitation" in header and "nsn" in header:
+            best = table  # keep going: later matches are nested deeper
+    return best
+
+
+def _column_map(header_cells) -> dict[str, int]:
+    cols: dict[str, int] = {}
+    for i, cell in enumerate(header_cells):
+        h = _text(cell).lower()
+        for key, needle in [
+            ("nsn", "nsn"),
+            ("nomenclature", "nomenclature"),
+            ("solicitation", "solicitation"),
+            ("status", "status"),
+            ("pr_qty", "qty"),
+            ("issued", "issue"),
+            ("return_by", "return"),
+            ("tech_docs", "technical"),
+        ]:
+            if needle in h and key not in cols:
+                cols[key] = i
+                break
+    return cols
+
+
+def parse_rfq_grid(soup: BeautifulSoup) -> list[dict]:
+    table = _find_results_table(soup)
+    if table is None:
+        return []
+    trs = table.find_all("tr", recursive=False) or table.find_all("tr")
+    cols = _column_map(trs[0].find_all(["th", "td"], recursive=False))
+    out: list[dict] = []
+    for tr in trs[1:]:
+        cells = tr.find_all("td", recursive=False)
+        if len(cells) < len(cols) or "__doPostBack" in str(tr):
+            continue  # pager / spacer rows
+
+        def cell(key):
+            i = cols.get(key)
+            return cells[i] if i is not None and i < len(cells) else None
+
+        sol_cell = cell("solicitation")
+        m = SOL_RE.search(_text(sol_cell))
+        if not m:
+            continue
+        sol = m.group(1)
+        sol_link = sol_cell.find("a", href=True) if sol_cell else None
+
+        nsn_cell = cell("nsn")
+        nsn_link = nsn_cell.find("a", href=True) if nsn_cell else None
+        nsn_text = _text(nsn_link) or _text(nsn_cell)
+        nsn_digits = digits(nsn_text)[:13]
+        is_nsn = len(nsn_digits) == 13
+        nomenclature = _text(cell("nomenclature"))
+
+        pr_qty = _text(cell("pr_qty"))
+        qty_m = re.search(r"qty\W*([\d,]+)", pr_qty, re.I)
+        pr_m = re.search(r"pr\W*#?\W*(\w+)", pr_qty, re.I)
+
+        out.append(
+            {
+                "solicitation_number": sol,
+                "nsn": nsn_digits if is_nsn else nsn_text,
+                "fsc": nsn_digits[:4] if is_nsn else None,
+                "nomenclature": nomenclature,
+                "quantity": int(qty_m.group(1).replace(",", "")) if qty_m else None,
+                "pr_number": pr_m.group(1) if pr_m else None,
+                "status": _text(cell("status")) or None,
+                "set_aside": _set_aside(sol_cell),
+                "issue_date": iso_date(_text(cell("issued"))),
+                "return_by_date": iso_date(_text(cell("return_by"))),
+                "solicitation_url": _abs(sol_link["href"]) if sol_link else solicitation_pdf_url(sol),
+                "nsn_url": _abs(nsn_link["href"]) if nsn_link else (nsn_page_url(nsn_digits) if is_nsn else None),
+            }
+        )
+    return out
+
+
+def _set_aside(sol_cell) -> str | None:
+    """Anything in the solicitation cell beyond the number itself (e.g. small-business set-aside notes)."""
+    if sol_cell is None:
+        return None
+    extra = SOL_RE.sub("", _text(sol_cell)).strip(" -|")
+    alts = [img.get("alt", "") for img in sol_cell.find_all("img") if img.get("alt")]
+    text = " ".join([extra, *alts]).strip()
+    return text or None
+
+
+def _abs(href: str) -> str:
+    return str(httpx.URL(BASE + "/RFQ/").join(href))
+
+
+def next_page_target(soup: BeautifulSoup, wanted: int) -> str | None:
+    """Return the __EVENTTARGET whose pager link asks for page `wanted` (incl. the '...' link)."""
+    for a in soup.find_all("a", href=True):
+        m = PAGER_RE.search(a["href"])
+        if m and int(m.group(2)) == wanted:
+            return m.group(1)
+    return None

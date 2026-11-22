@@ -1,0 +1,45 @@
+"""CLI: pull every RFQ issued on a date and save it as a JSON snapshot.
+
+    uv run python -m app.scrape 2026-11-20
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+from app.dibbs import DibbsClient
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def snapshot_path(d: date) -> Path:
+    return DATA_DIR / f"snapshot-{d.isoformat()}.json"
+
+
+def scrape(d: date, save_raw: bool = True) -> list[dict]:
+    raw_dir = DATA_DIR / "raw" if save_raw else None
+    if raw_dir:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+    with DibbsClient() as client:
+        rows = client.fetch_issue_date(d, raw_dir=raw_dir)
+    scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for r in rows:
+        r["scraped_at"] = scraped_at
+    DATA_DIR.mkdir(exist_ok=True)
+    snapshot_path(d).write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    return rows
+
+
+def main(argv: list[str]) -> None:
+    d = date.fromisoformat(argv[1]) if len(argv) > 1 else date.today()
+    rows = scrape(d)
+    print(f"{len(rows)} RFQs issued {d} -> {snapshot_path(d)}")
+    for r in rows[:5]:
+        print(f"  {r['solicitation_number']:<18} {r['nsn']:<15} {r['nomenclature'][:30]:<30} due {r['return_by_date']}")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

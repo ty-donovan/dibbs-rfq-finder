@@ -1,0 +1,20 @@
+[project]
+name = "dibbs-rfq-finder"
+version = "0.1.0"
+description = "Pull daily DIBBS RFQs and find the ones worth quoting."
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "lxml>=6.1.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.uv]
+package = false
